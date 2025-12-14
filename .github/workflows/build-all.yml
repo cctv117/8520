@@ -1,72 +1,352 @@
-name: Build All Devices Kernel (Matrix Parallel)
+name: Build Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      device:
+        description: '选择设备代号'
+        required: true
+        default: 'alioth'
+        type: choice
+        options:
+          - psyche
+          - umi
+          - munch
+          - lmi
+          - cmi
+          - cas
+          - apollo
+          - alioth
+          - elish
+          - enuma
+          - dagu
+          - pipa
+      ksu_type:
+        description: 'KernelSU类型'
+        required: false
+        default: 'SukiSU-Ultra'
+        type: choice
+        options:
+          - 'none'
+          - 'SukiSU-Ultra'
+          - 'rksu'
+      build_type:
+        description: '构建类型'
+        required: false
+        default: 'miui'
+        type: choice
+        options:
+          - 'all'
+          - 'aosp'
+          - 'miui'
+
+env:
+  CCACHE_DIR: "$HOME/.ccache_4.19.157"
+  CCACHE_MAXSIZE: "3G"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        device: [psyche, umi, munch, lmi, cmi, cas, apollo, alioth, elish, enuma, dagu, pipa]
 
     steps:
-    - name: Checkout source
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
+        submodules: recursive
 
-    - name: Install dependencies
+    - name: 安装依赖
       run: |
         sudo apt update
-        sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3 unzip
+        sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3 tar libelf-dev patch
 
-    - name: Setup ZyC-clang toolchain
+    - name: 生成短哈希
+      id: vars
+      run: echo "SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_ENV
+
+    - name: 配置ccache目录
       run: |
-        mkdir -p $HOME/ZyC-clang
-        cd $HOME/ZyC-clang
-        wget https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250924-release/Clang-22.0.0git-20250924.tar.gz
-        tar -zxf Clang-22.0.0git-20250924.tar.gz
+        echo "CCACHE_DIR=$HOME/.ccache_4.19.157" >> $GITHUB_ENV
+        echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+        echo "当前磁盘空间："
+        df -h
+        echo "当前构建内核版本：4.19.157"
+
+    - name: 载入当前版本内核的ccache缓存
+      uses: actions/cache@v4
+      id: ccache-restore
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-neov3-4.19.157-${{ runner.os }}-main
+        restore-keys: |
+          ccache-neov3-4.19.157-${{ runner.os }}-
+          ccache-neov3-4.19.157-
+
+    - name: 初始化并配置ccache
+      run: |
+        mkdir -p "$CCACHE_DIR"
+        echo "配置ccache缓存大小为: $CCACHE_MAXSIZE"
+        ccache -M "$CCACHE_MAXSIZE"
+        ccache -o compression=true
+        echo "ccache初始状态:"
+        ccache -s
+
+    - name: 设置ZYC Clang工具链
+      run: |
+        mkdir -p $HOME/zyc-clang
+        cd $HOME/zyc-clang
+        wget -q https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz
+        tar -zxf Clang-15.0.7-20251111.tar.gz
+        rm -f Clang-15.0.7-20251111.tar.gz
         cd $GITHUB_WORKSPACE
 
-    - name: Build kernel for ${{ matrix.device }} (No KSU)
+    - name: 添加KernelSU
+      id: ksu_version
       run: |
-        bash build.sh ${{ matrix.device }}
+        if [[ "${{ github.event.inputs.ksu_type }}" == "SukiSU-Ultra" ]]; then
+          echo "正在配置SukiSU Ultra..."
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/builtin/kernel/setup.sh" | bash -s builtin
+          cd ./KernelSU
+          
+          # 获取当前 Git 提交的短哈希 (8位)
+          GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
+          echo "当前提交哈希: $GIT_COMMIT_HASH"
+          export KSU_VERSION=$KSU_VERSION
+          
+          # 尝试最多 3 次获取 KernelSU API 版本号
+          for i in {1..3}; do
+            # 从远程 Kbuild 中提取 KSU_API_VERSION
+            KSU_API_VERSION=$(curl -s "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/Kbuild" | 
+              # 查找第一个包含版本定义的行
+              grep -m1 "KSU_VERSION_API :=" | 
+              # 提取等号后的值
+              awk -F'= ' '{print $2}' | 
+              # 删除所有空白字符
+              tr -d '[:space:]')
+            # 如果成功获取到版本号则跳出循环，否则等待 1 秒后重试
+            [ -n "$KSU_API_VERSION" ] && break || sleep 1
+          done
+          # 如果获取失败，使用默认版本号 4.1.0
+          [ -z "$KSU_API_VERSION" ] && KSU_API_VERSION="4.1.0"
+          # 将 API 版本号存储到 GitHub 环境变量
+          echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
+          
+          # 生成自定义版本号（基于提交计数）, 失败时使用 114514
+          CALCULATED_VERSION=$(expr $(git rev-list --count main) + 37185 2>/dev/null || echo 114514)
+          
+          # 版本定义
+          VERSION_DEFINITIONS=$'define get_ksu_version_full\n"v\\$1-'"$GIT_COMMIT_HASH"'@ Or so. 左右-'"$CALCULATED_VERSION"$'"\nendef\n\nKSU_VERSION_API := '"$KSU_API_VERSION"$'\nKSU_VERSION_FULL := "v'"$KSU_API_VERSION"$'-'"$GIT_COMMIT_HASH"'@ Or so. 左右-'"$CALCULATED_VERSION"$'"'
+          
+          # 清理内核 Kbuild 中的旧版本定义
+          # 删除版本函数
+          sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
+          # 删除 API 版本定义
+          sed -i '/KSU_VERSION_API :=/d' kernel/Kbuild
+          # 删除完整版本定义
+          sed -i '/KSU_VERSION_FULL :=/d' kernel/Kbuild
+          # 在 REPO_OWNER 行后插入新版本定义
+          awk -v def="$VERSION_DEFINITIONS" '
+            # 当找到 REPO_OWNER 行时，插入版本定义并设置标记
+            /REPO_OWNER :=/ {print; print def; inserted=1; next}
+            # 打印所有行
+            1
+            # 如果未找到插入点，在文件末尾追加
+            END {if (!inserted) print def}
+          ' kernel/Kbuild > kernel/Kbuild.tmp && mv kernel/Kbuild.tmp kernel/Kbuild
 
-    - name: Build kernel for ${{ matrix.device }} (With KSU)
+          # 存储版本号到 GitHub 环境变量
+          echo "KSUVER=$CALCULATED_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$CALCULATED_VERSION" >> $GITHUB_OUTPUT
+          
+          # 保存完整版本号 - 格式: "v4.1.0-68cc177c@ Or so. 左右-40221"
+          echo "KSU_VERSION_FULL=\"v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@ Or so. 左右-${CALCULATED_VERSION}\"" >> $GITHUB_ENV
+
+          # 验证修改结果
+          echo "=== 验证版本定义 ==="
+          grep -A10 "REPO_OWNER" kernel/Kbuild  # 检查插入点后的内容
+          grep "KSU_VERSION_FULL" kernel/Kbuild # 确认版本定义存在
+          echo "SukiSU版本号: \"v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@ Or so. 左右-${CALCULATED_VERSION}\""
+          
+          cd $GITHUB_WORKSPACE
+
+        elif [[ "${{ github.event.inputs.ksu_type }}" == "rksu" ]]; then
+          echo "正在配置RKSU..."
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          echo "RKSU配置完成"
+        else
+          echo "不使用KernelSU"
+        fi
+
+    - name: 检查Kbuild文件
+      if: github.event.inputs.ksu_type == 'SukiSU-Ultra'
       run: |
-        bash build.sh ${{ matrix.device }} ksu
+        echo "=== 检查所有Kbuild文件中的版本定义 ==="
+        find . -name "Kbuild" -type f | while read kbuild_file; do
+          if grep -q "KSU_VERSION" "$kbuild_file"; then
+            echo "文件: $kbuild_file"
+            echo "版本定义:"
+            grep -A3 "KSU_VERSION" "$kbuild_file" || echo "未找到KSU_VERSION定义"
+            echo "---"
+          fi
+        done
 
-    - name: Upload zips for ${{ matrix.device }}
+    - name: 清理之前的构建
+      run: |
+        rm -rf out
+        mkdir -p out
+
+    - name: 显示自定义版本信息
+      if: github.event.inputs.ksu_type == 'SukiSU-Ultra'
+      run: |
+        echo "=== 自定义SukiSU-Ultra版本信息 ==="
+        echo "版本号: ${{ env.KSU_VERSION_FULL }}"
+        echo "API版本: ${{ env.KSU_API_VERSION }}"
+        echo "计算版本: ${{ env.KSUVER }}"
+        echo "Git提交: $(echo ${GITHUB_SHA} | cut -c1-8)"
+        echo "构建时间: $(date)"
+        echo "================================"
+
+    - name: 调试信息
+      run: |
+        echo "=== 调试信息 ==="
+        echo "工作目录: $(pwd)"
+        echo "文件列表:"
+        ls -la
+        if [ -f "build.sh" ]; then
+          echo "build.sh 权限:"
+          ls -la build.sh
+          echo "build.sh 内容前10行:"
+          head -10 build.sh
+        else
+          echo "错误: build.sh 文件不存在"
+        fi
+        echo "环境变量:"
+        echo "BUILD_DEVICE: ${{ github.event.inputs.device }}"
+        echo "BUILD_KSU_TYPE: ${{ github.event.inputs.ksu_type }}"
+        echo "BUILD_TYPE: ${{ github.event.inputs.build_type }}"
+        echo "KSU_VERSION_FULL: ${{ env.KSU_VERSION_FULL }}"
+
+    - name: 构建内核
+      env:
+        KSU_VERSION_FULL: ${{ env.KSU_VERSION_FULL }}
+        KSU_API_VERSION: ${{ env.KSU_API_VERSION }}
+      run: |
+        # 设置ccache环境变量
+        export CCACHE_COMPILERCHECK="none"
+        export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+        export CCACHE_NOHASHDIR="true"
+        
+        echo "=== 构建参数 ==="
+        echo "设备: ${{ github.event.inputs.device }}"
+        echo "KSU类型: ${{ github.event.inputs.ksu_type }}"
+        echo "构建类型: ${{ github.event.inputs.build_type }}"
+        echo "KSU版本: $KSU_VERSION_FULL"
+        echo "KSU API: $KSU_API_VERSION"
+        
+        # 修正构建类型参数格式
+        BUILD_TYPE_PARAM=""
+        if [[ "${{ github.event.inputs.build_type }}" == "aosp" ]]; then
+            BUILD_TYPE_PARAM="--aosp"
+            echo "构建类型参数: --aosp"
+        elif [[ "${{ github.event.inputs.build_type }}" == "miui" ]]; then
+            BUILD_TYPE_PARAM="--miui"
+            echo "构建类型参数: --miui"
+        else
+            echo "构建类型参数: 空 (构建全部)"
+        fi
+        
+        # 检查脚本是否存在并执行
+        if [ -f "build.sh" ]; then
+            chmod +x build.sh
+            echo "开始执行构建脚本..."
+            echo "最终构建命令: ./build.sh \"${{ github.event.inputs.device }}\" \"${{ github.event.inputs.ksu_type }}\" \"$BUILD_TYPE_PARAM\""
+            
+            # 执行构建
+            ./build.sh "${{ github.event.inputs.device }}" "${{ github.event.inputs.ksu_type }}" "$BUILD_TYPE_PARAM"
+            BUILD_EXIT_CODE=$?
+            
+            if [ $BUILD_EXIT_CODE -eq 0 ]; then
+                echo "✅ 构建成功完成"
+            else
+                echo "❌❌ 构建失败，退出码: $BUILD_EXIT_CODE"
+                exit $BUILD_EXIT_CODE
+            fi
+        else
+            echo "❌❌ 错误: build.sh 文件不存在"
+            echo "当前目录内容:"
+            ls -la
+            exit 1
+        fi
+
+    - name: 显示ccache统计信息
+      run: |
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        echo "构建后ccache统计信息:"
+        ccache -s
+
+    - name: 检查构建产物
+      run: |
+        echo "=== 生成的刷机包 ==="
+        find . -name "Kernel_*.zip" -type f | while read zipfile; do
+          echo "刷机包: $(basename "$zipfile")"
+          echo "大小: $(du -h "$zipfile" | cut -f1)"
+          echo "修改时间: $(stat -c %y "$zipfile")"
+        done || echo "未找到zip文件"
+        
+        echo "=== 内核镜像文件 ==="
+        if [ -d "out/arch/arm64/boot" ]; then
+          ls -la out/arch/arm64/boot/
+        else
+          echo "未找到内核镜像目录"
+        fi
+
+    - name: 上传内核包
       uses: actions/upload-artifact@v4
       with:
-        name: zips-${{ matrix.device }}
+        name: ${{ github.event.inputs.device }}-${{ github.event.inputs.ksu_type != 'none' && github.event.inputs.ksu_type || 'noksu' }}-${{ github.event.inputs.build_type }}-packages
         path: |
-          Kernel_MIUI_${{ matrix.device }}*.zip
-          Kernel_AOSP_${{ matrix.device }}*.zip
+          Kernel_*.zip
+        retention-days: 7
+        if-no-files-found: ignore
 
-  release:
-    runs-on: ubuntu-22.04
-    needs: build
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
+    - name: 上传内核镜像
+      uses: actions/upload-artifact@v4
       with:
-        path: ./release_zips
+        name: ${{ github.event.inputs.device }}-kernel-images
+        path: |
+          out/arch/arm64/boot/Image
+          out/arch/arm64/boot/dtb
+        retention-days: 3
+        if-no-files-found: ignore
 
-    - name: Get date and short SHA
-      id: vars
+    - name: 保存ccache缓存
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-neov3-4.19.157-${{ runner.os }}-main-${{ env.SHORT_SHA }}
+
+    - name: 清理临时文件
+      if: always()
       run: |
-        echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
-        echo "sha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+        echo "构建完成，清理临时文件..."
+        find . -name "*.o" -delete 2>/dev/null || true
+        find . -name ".*.cmd" -delete 2>/dev/null || true
+        find . -name "*.tmp" -delete 2>/dev/null || true
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: build-${{ steps.vars.outputs.date }}-${{ steps.vars.outputs.sha }}
-        name: "Kernel Build ${{ steps.vars.outputs.date }}-${{ steps.vars.outputs.sha }}"
-        body: "Automated kernel build for commit ${{ github.sha }}"
-        files: ./release_zips/**/*.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: 构建完成摘要
+      run: |
+        echo "=== 构建完成摘要 ==="
+        echo "设备: ${{ github.event.inputs.device }}"
+        echo "KernelSU类型: ${{ github.event.inputs.ksu_type }}"
+        echo "构建类型: ${{ github.event.inputs.build_type }}"
+        echo "工作流运行编号: ${{ github.run_number }}"
+        echo "提交哈希: ${{ github.sha }}"
+        echo "构建时间: $(date)"
+        
+        if [[ "${{ github.event.inputs.ksu_type }}" == "SukiSU-Ultra" ]]; then
+          echo "自定义版本: ${{ env.KSU_VERSION_FULL }}"
+        fi
+        
+        # 显示生成的文件
+        echo "生成的文件:"
+        find . -name "Kernel_*.zip" -exec echo "  - {}" \; 2>/dev/null || echo "  未找到刷机包"

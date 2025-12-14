@@ -336,7 +336,7 @@ apply_kpm_patch() {
         print_step "应用KPM补丁"
         cd out/arch/arm64/boot/
         
-        if curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch; then
+        if curl -LSs "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" -o patch; then
             chmod +x patch
             if ./patch; then
                 rm -f Image

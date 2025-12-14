@@ -2,11 +2,10 @@
 
 # =============================================================================
 # Android内核构建脚本
-# 版本: 1.0
-# 功能: 支持AOSP/MIUI双版本构建，集成KernelSU和SUSFS补丁
+# 1.0 - 使用文档1的SUSFS补丁处理逻辑
 # =============================================================================
 
-# 颜色定义用于终端输出
+# 颜色定义
 yellow='\033[0;33m'
 white='\033[0m'
 red='\033[0;31m'
@@ -47,7 +46,7 @@ print_success() {
 
 # 信息函数
 print_info() {
-    color_echo "$blue" "ℹℹ $1"
+    color_echo "$blue" "ℹℹℹℹ $1"
 }
 
 # 警告函数
@@ -55,7 +54,7 @@ print_warning() {
     color_echo "$yellow" "警告: $1"
 }
 
-# 确保脚本在遇到错误时退出
+# Ensure the script exits on error
 set -e
 
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
@@ -85,6 +84,15 @@ show_usage() {
     color_echo "$yellow" "  $0 lmi rksu --miui         # 构建MIUI+RKSU版本"
     color_echo "$yellow" "  $0 lmi none --aosp         # 构建无KSU的AOSP版本"
     color_echo "$yellow" "  $0 lmi none --miui         # 构建无KSU的MIUI版本"
+    echo
+    color_echo "$yellow" "可用设备:"
+    if [[ -d "arch/arm64/configs" ]]; then
+        ls arch/arm64/configs/*_defconfig 2>/dev/null | 
+            sed "s|.*/||; s|_defconfig||" | xargs printf "  %s\n" || 
+            color_echo "$red" "  无法读取设备配置目录"
+    else
+        color_echo "$red" "  配置目录不存在"
+    fi
 }
 
 if [ -z "$TARGET_DEVICE" ]; then
@@ -129,7 +137,7 @@ case "$KSU_TYPE" in
         KSU_ENABLE=1
         KPM_ENABLE=1
         KSU_ZIP_STR=SukiSU-Ultra
-        print_info "启用SukiSU-Ultra (包含KPM功能)"
+        print_info "启用SukiSU-Ultra"
         ;;
     "rksu")
         KSU_ENABLE=1
@@ -194,155 +202,158 @@ clang --version
 
 print_info "TARGET_DEVICE: $TARGET_DEVICE"
 
-# =============================================================================
-# 自定义版本信息处理
-# 功能: 使用环境变量中的自定义版本信息
-# =============================================================================
-setup_custom_version() {
-    print_info "设置自定义版本信息..."
+# ==========================================
+# SUSFS 2.0.00 补丁处理
+# ==========================================
+apply_susfs_patch() {
+    local PATCH_URL="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/blob/mainline/Patches/Patch/susfs_upgrade_to_2000_4.19.patch"
+    local PATCH_FILE="susfs_upgrade_to_2000_4.19.patch"
     
-    # 检查环境变量中的自定义版本信息
-    if [ -n "$KSU_VERSION_FULL" ]; then
-        print_info "检测到自定义KernelSU版本: $KSU_VERSION_FULL"
-        export KSU_VERSION_FULL="$KSU_VERSION_FULL"
-    else
-        # 如果没有自定义版本，使用默认版本
-        KSU_VERSION_FULL="v4.1.0-$(git rev-parse --short=8 HEAD)@ Or so. 左右-40221"
-        print_info "使用默认KernelSU版本: $KSU_VERSION_FULL"
-        export KSU_VERSION_FULL="$KSU_VERSION_FULL"
+    print_step "开始SUSFS 2.0.00补丁处理"
+    print_info "补丁URL: $PATCH_URL"
+
+    # 下载补丁
+    print_info "下载SUSFS补丁..."
+    if ! curl -LSs "${PATCH_URL}?raw=true" -o "$PATCH_FILE"; then
+        print_warning "补丁文件下载失败"
+        return 1
+    fi
+
+    # 应用补丁
+    print_info "应用SUSFS补丁..."
+    if ! patch -p1 --batch --forward --quiet < "$PATCH_FILE"; then
+        print_warning "补丁应用失败"
+        return 2
     fi
     
-    if [ -n "$KSU_API_VERSION" ]; then
-        print_info "检测到KernelSU API版本: $KSU_API_VERSION"
-        export KSU_API_VERSION="$KSU_API_VERSION"
-    else
-        KSU_API_VERSION="4.1.0"
-        print_info "使用默认KernelSU API版本: $KSU_API_VERSION"
-        export KSU_API_VERSION="$KSU_API_VERSION"
-    fi
+    print_success "SUSFS补丁应用成功"
+    rm -f "$PATCH_FILE"
+    find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete
+    return 0
+}
+
+# SUSFS补丁处理主流程
+handle_susfs_patch() {
+    print_step "SUSFS补丁处理流程"
     
-    # 设置内核版本信息
+    # 应用补丁
+    apply_susfs_patch
+    local PATCH_EXIT_CODE=$?
+    
+    # 补丁失败处理
+    if [ "$PATCH_EXIT_CODE" -eq 1 ] || [ "$PATCH_EXIT_CODE" -eq 2 ]; then
+        print_warning "补丁处理失败，启动恢复机制"
+        
+        # 恢复所有修改
+        print_info "恢复文件修改..."
+        if git checkout -- .; then
+            print_success "文件恢复成功"
+        else
+            print_warning "部分文件恢复失败"
+        fi
+        
+        # 清理临时文件
+        rm -f "susfs_upgrade_to_2000_4.19.patch"
+        find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete
+        
+        # 使用备选方案：cherry-pick
+        print_info "尝试cherry-pick提交 b4df305..."
+        if git cherry-pick b4df305; then
+            print_success "cherry-pick成功"
+        else
+            error_exit "cherry-pick失败！请检查提交b4df305是否存在"
+        fi
+    else
+        print_success "SUSFS补丁处理完成"
+    fi
+}
+
+# 设置版本信息函数
+setup_version_info() {
     echo 1 > "out/.version"
     export KBUILD_BUILD_VERSION="1"
     export LOCALVERSION="-g92c089fc2d37"
     export KBUILD_BUILD_USER="xiaomi-builder"
     export KBUILD_BUILD_HOST="xiaomi-build-server"
     export KBUILD_BUILD_TIMESTAMP="Wed Oct 29 11:41:46 UTC 2025"
-    
-    print_success "自定义版本信息设置完成"
-    print_info "KSU_VERSION_FULL: $KSU_VERSION_FULL"
-    print_info "KSU_API_VERSION: $KSU_API_VERSION"
-}
-
-# =============================================================================
-# SUSFS 2.0.00 补丁处理函数
-# 功能: SUSFS补丁处理机制
-# =============================================================================
-apply_susfs_patch() {
-    local PATCH_URL="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/raw/mainline/Patches/Patch/susfs_upgrade_to_2000_4.19.patch"
-    local PATCH_FILE="susfs_upgrade_to_2000_4.19.patch"
-    
-    print_step "开始SUSFS 2.0.00补丁处理"
-    
-    # 检查是否已经应用过补丁
-    print_info "检查SUSFS补丁状态..."
-    if [ -f "fs/susfs.c" ]; then
-        print_success "SUSFS补丁已经应用过，跳过"
-        return 0
-    fi
-    
-    # 下载补丁文件
-    print_info "下载SUSFS补丁..."
-    if ! curl -LSs "$PATCH_URL" -o "$PATCH_FILE"; then
-        print_warning "SUSFS补丁下载失败，尝试备用URL..."
-        # 尝试备用URL
-        PATCH_URL="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_upgrade_to_2000_4.19.patch"
-        if ! curl -LSs "$PATCH_URL" -o "$PATCH_FILE"; then
-            print_warning "SUSFS补丁下载失败，跳过补丁"
-            return 1
-        fi
-    fi
-
-    # 检查补丁文件是否下载成功
-    if [ ! -f "$PATCH_FILE" ]; then
-        print_warning "SUSFS补丁文件不存在"
-        return 1
-    fi
-
-    # 检查补丁文件内容
-    if [ ! -s "$PATCH_FILE" ]; then
-        print_warning "SUSFS补丁文件为空"
-        rm -f "$PATCH_FILE"
-        return 1
-    fi
-
-    # 应用补丁到内核源码
-    print_info "应用SUSFS补丁..."
-    if patch -p1 --batch --forward < "$PATCH_FILE" 2>/dev/null; then
-        print_success "SUSFS补丁应用成功"
-        # 验证补丁是否真正应用
-        if [ -f "fs/susfs.c" ]; then
-            print_success "SUSFS补丁验证成功"
-        else
-            print_warning "SUSFS补丁应用但文件未生成，可能补丁格式不匹配"
-        fi
+   
+    # 使用环境变量中的KernelSU版本信息（如果存在）
+    if [ -n "$KSU_VERSION_FULL" ]; then
+        print_info "使用自定义KernelSU版本: $KSU_VERSION_FULL"
+        export KSU_VERSION_FULL="$KSU_VERSION_FULL"
     else
-        # 检查补丁状态
-        if find . -name "*.rej" | grep -q .; then
-            print_warning "SUSFS补丁有冲突，发现.rej文件"
-            # 显示冲突文件
-            find . -name "*.rej" -exec echo "冲突文件: {}" \;
-        elif find . -name "*.orig" | grep -q .; then
-            print_success "SUSFS补丁可能已经应用过（发现.orig备份文件）"
-        else
-            print_warning "SUSFS补丁应用失败"
-        fi
+        print_info "使用默认KernelSU版本"
     fi
     
-    # 清理临时文件
-    rm -f "$PATCH_FILE"
-    find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete 2>/dev/null || true
+    if [ -n "$KSU_API_VERSION" ]; then
+        export KSU_API_VERSION="$KSU_API_VERSION"
+    fi
     
-    return 0
+    print_success "版本信息设置完成"
 }
 
-# =============================================================================
-# 补丁失败处理函数
-# 功能: 当补丁应用失败时进行恢复操作
-# =============================================================================
-handle_patch_failure() {
-    print_info "补丁处理失败，开始恢复..."
-    # 恢复被修改的文件
-    git checkout -- . || print_warning "部分文件恢复失败"
-    rm -f "susfs_upgrade_to_2000_4.19.patch"
-    find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete 2>/dev/null || true
-    
-    print_success "文件恢复完成"
-}
-
-# =============================================================================
-# KernelSU目录检查函数
-# 功能: 验证KernelSU目录是否存在并显示版本信息
-# =============================================================================
-check_kernelsu() {
+# 配置KernelSU函数
+configure_kernelsu() {
     if [ $KSU_ENABLE -eq 1 ]; then
-        if [ -d "KernelSU" ]; then
-            print_success "KernelSU目录已存在"
-            if [ -n "$KSU_VERSION_FULL" ]; then
-                print_info "KernelSU版本: $KSU_VERSION_FULL"
-            fi
+        print_info "配置KernelSU选项"
+        scripts/config --file out/.config \
+            -e KSU \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT \
+            -e KSU_SUSFS_SUS_MAP \
+            -e THREAD_INFO_IN_TASK
+            
+        # 根据KSU类型配置KPM
+        if [ "$KPM_ENABLE" -eq 1 ]; then
+            scripts/config --file out/.config \
+                -e KPM \
+                -e KALLSYMS \
+                -e KALLSYMS_ALL
+            print_info "已启用KPM支持"
         else
-            print_warning "KernelSU目录不存在，但KSU已启用"
+            scripts/config --file out/.config \
+                -d KPM \
+                -d KALLSYMS \
+                -d KALLSYMS_ALL
         fi
     else
-        print_info "未启用KernelSU"
+        scripts/config --file out/.config -d KSU
+        scripts/config --file out/.config -d KSU_SUSFS
+        print_info "已禁用KernelSU"
     fi
 }
 
-# =============================================================================
-# AnyKernel3准备函数
-# 功能: 下载并准备刷机包打包环境
-# =============================================================================
+# 应用KPM补丁函数
+apply_kpm_patch() {
+    if [[ "$KPM_ENABLE" -eq 1 && "$KSU_TYPE" == "SukiSU-Ultra" ]]; then
+        print_step "应用KPM补丁"
+        cd out/arch/arm64/boot/
+        
+        if curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch; then
+            chmod +x patch
+            if ./patch; then
+                rm -f Image
+                mv oImage Image
+                print_success "KPM补丁应用成功"
+            else
+                print_warning "KPM补丁应用失败，使用原始镜像"
+            fi
+            rm -f patch
+        else
+            print_warning "无法下载KPM补丁，使用原始镜像"
+        fi
+        cd -
+    fi
+}
+
+# 准备AnyKernel3函数
 prepare_anykernel() {
     print_step "准备AnyKernel3"
     rm -rf anykernel/
@@ -353,114 +364,37 @@ prepare_anykernel() {
     fi
 }
 
-# =============================================================================
-# KernelSU配置函数
-# 功能: 配置内核中的KernelSU相关选项
-# =============================================================================
-configure_kernelsu() {
-    if [ $KSU_ENABLE -eq 1 ]; then
-        # 检查KernelSU目录是否存在
-        if [ ! -d "KernelSU" ]; then
-            print_warning "KernelSU目录不存在，跳过KernelSU配置"
-            return
-        fi
-        
-        print_info "配置KernelSU选项"
-        # 启用KernelSU相关配置选项
-        scripts/config --file out/.config \
-            -e KSU \
-            -e KSU_SUSFS \
-            -e KPM \
-            -e KALLSYMS \
-            -e KALLSYMS_ALL
-        
-        print_success "KernelSU配置完成"
-    else
-        scripts/config --file out/.config -d KSU
-        print_info "禁用KernelSU"
-    fi
-}
-
-# =============================================================================
-# KPM补丁应用函数
-# 功能: 下载并应用Kernel Patch Manager补丁到内核镜像
-# =============================================================================
-apply_kpm_patch() {
-    if [[ $KSU_ENABLE -eq 1 && $KPM_ENABLE -eq 1 ]]; then
-        # 检查KernelSU目录是否存在
-        if [ ! -d "KernelSU" ]; then
-            print_warning "KernelSU目录不存在，跳过KPM补丁"
-            return
-        fi
-        
-        print_step "应用KPM补丁"
-        
-        # 检查内核镜像是否存在
-        if [ ! -f "out/arch/arm64/boot/Image" ]; then
-            print_warning "内核镜像不存在，跳过KPM补丁"
-            return
-        fi
-        
-        cd out/arch/arm64/boot/
-        
-        # 下载KPM补丁工具
-        if curl -LSs "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" -o patch_linux; then
-            chmod +x patch_linux
-            # 备份原始镜像
-            cp Image Image.orig
-            
-            # 应用补丁到内核镜像
-            if ./patch_linux; then
-                if [ -f "oImage" ]; then
-                    rm -f Image
-                    mv oImage Image
-                    print_success "KPM补丁应用成功"
-                else
-                    print_warning "KPM补丁应用但未生成oImage文件"
-                    mv Image.orig Image
-                fi
-            else
-                print_warning "KPM补丁应用失败，使用原始镜像"
-                mv Image.orig Image
-            fi
-            rm -f patch_linux
-        else
-            print_warning "无法下载KPM补丁，使用原始镜像"
-        fi
-        cd -
-    fi
-}
-
-# =============================================================================
 # 镜像打包函数
-# 功能: 将编译好的内核文件打包成刷机包
-# =============================================================================
 image_repack() {
     local system_type=$1
     print_step "打包${system_type}镜像"
     
-    # 检查内核镜像是否生成成功
+    # 检查构建是否成功
     if [ ! -f "out/arch/arm64/boot/Image" ]; then
         error_exit "内核构建失败，Image文件不存在"
     fi
 
-    # 生成DTB设备树文件
+    # 应用KPM补丁
+    apply_kpm_patch
+
+    # 生成DTB
     print_info "生成DTB文件"
     find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > out/arch/arm64/boot/dtb 2>/dev/null || {
         print_warning "DTB生成失败，创建空文件"
         touch out/arch/arm64/boot/dtb
     }
 
-    # 应用KPM补丁到内核镜像
-    apply_kpm_patch
-
-    # 准备anykernel目录结构
+    # 清理并准备anykernel目录
     rm -rf anykernel/kernels/
     mkdir -p anykernel/kernels/
 
-    # 复制内核文件到打包目录
-    cp out/arch/arm64/boot/Image anykernel/kernels/
-    print_success "已复制Image文件"
+    # 复制必要的内核文件
+    if [ -f "out/arch/arm64/boot/Image" ]; then
+        cp out/arch/arm64/boot/Image anykernel/kernels/
+        print_success "已复制Image文件"
+    else
+        error_exit "Image文件不存在"
+    fi
 
     if [ -f "out/arch/arm64/boot/dtb" ]; then
         cp out/arch/arm64/boot/dtb anykernel/kernels/
@@ -469,12 +403,21 @@ image_repack() {
         print_warning "dtb文件不存在，跳过复制"
     fi
 
+    # 恢复MIUI构建的设备树修改
+    if [ "$system_type" == "MIUI" ]; then
+        if [ -d ".dts.bak" ]; then
+            rm -rf arch/arm64/boot/dts/vendor/qcom
+            mv .dts.bak arch/arm64/boot/dts/vendor/qcom
+            print_success "设备树恢复完成"
+        fi
+    fi
+
     # 创建刷机包
     cd anykernel
     local timestamp=$(date +'%Y%m%d_%H%M%S')
     local zip_filename="Kernel_${system_type}_${TARGET_DEVICE}_${KSU_ZIP_STR}_${timestamp}_anykernel3_${GIT_COMMIT_ID}.zip"
 
-    # 使用zip命令打包所有必要文件
+    # 打包
     zip -r9 "$zip_filename" ./* -x .git .gitignore out/ ./*.zip
     
     if [ $? -eq 0 ] && [ -f "$zip_filename" ]; then
@@ -484,77 +427,56 @@ image_repack() {
     else
         error_exit "${system_type}刷机包创建失败"
     fi
-    cd -
+    cd ..
 }
 
-# =============================================================================
-# AOSP版本构建函数
-# 功能: 构建适用于AOSP系统的内核版本
-# =============================================================================
+# AOSP构建函数
 build_aosp() {
     if [ "$BUILD_AOSP" = true ]; then
         print_step "开始构建AOSP内核"
         
-        # 清理之前的构建输出
+        # 清理
         rm -rf out/
         
-        # 配置内核编译选项
+        # 配置
         make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
+        setup_version_info
+        configure_kernelsu
         
-        # 设置自定义版本信息
-        setup_custom_version
-        
-        # 检查并配置KernelSU
-        check_kernelsu
-        if [ $KSU_ENABLE -eq 1 ] && [ -d "KernelSU" ]; then
-            configure_kernelsu
-        fi
-        
-        # 开始编译内核
+        # 编译
         local start_time=$(date +%s)
         print_info "开始编译AOSP内核..."
         make $MAKE_ARGS -j$(nproc)
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
-        # 检查编译结果
+        # 检查结果
         if [ -f "out/arch/arm64/boot/Image" ]; then
             print_success "AOSP内核编译成功，耗时: $((duration / 60))分$((duration % 60))秒"
         else
             error_exit "AOSP内核编译失败"
         fi
         
-        # 打包生成的内核文件
+        # 打包
         image_repack "AOSP"
         print_success "AOSP内核构建完成"
     fi
 }
 
-# =============================================================================
-# MIUI版本构建函数
-# 功能: 构建适用于MIUI系统的内核版本，包含设备树修改
-# =============================================================================
+# MIUI构建函数
 build_miui() {
     if [ "$BUILD_MIUI" = true ]; then
         print_step "开始构建MIUI内核"
         
-        # 清理之前的构建输出
+        # 清理
         rm -rf out/
         
-        # 备份设备树文件
         dts_source=arch/arm64/boot/dts/vendor/qcom
-        if [ -d "$dts_source" ]; then
-            cp -a ${dts_source} .dts.bak
-            print_success "设备树备份完成"
-        else
-            print_warning "设备树目录不存在，跳过备份"
-        fi
 
-        # =============================================================================
-        # MIUI设备树修改部分
-        # 功能: 修改设备树文件以适配MIUI系统的特殊需求
-        # =============================================================================
-        
+        # 备份dts
+        cp -a ${dts_source} .dts.bak
+
+        # MIUI特定修改
         print_info "应用MIUI设备树修改..."
         
         # 面板尺寸修正
@@ -609,22 +531,15 @@ build_miui() {
         sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
         sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-
-        # 配置内核编译选项
+        # 配置
         make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
-        
-        # 设置自定义版本信息
-        setup_custom_version
-        
-        # 检查并配置KernelSU
-        check_kernelsu
-        if [ $KSU_ENABLE -eq 1 ] && [ -d "KernelSU" ]; then
-            configure_kernelsu
-        fi
+        setup_version_info
+        configure_kernelsu
         
         # MIUI特定配置
         print_info "应用MIUI特定配置..."
         scripts/config --file out/.config \
+            --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
             -e PERF_CRITICAL_RT_TASK \
             -e SF_BINDER \
             -e OVERLAY_FS \
@@ -650,38 +565,28 @@ build_miui() {
             -e BOOTUP_RECLAIM \
             -e MI_RECLAIM \
             -e RTMM
-        
-        # 开始编译内核
+
+        # 编译
         local start_time=$(date +%s)
         print_info "开始编译MIUI内核..."
         make $MAKE_ARGS -j$(nproc)
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
-        # 检查编译结果
+        # 检查结果
         if [ -f "out/arch/arm64/boot/Image" ]; then
             print_success "MIUI内核编译成功，耗时: $((duration / 60))分$((duration % 60))秒"
         else
             error_exit "MIUI内核编译失败"
         fi
         
-        # 恢复设备树文件
-        if [ -d ".dts.bak" ]; then
-            rm -rf $dts_source
-            mv .dts.bak $dts_source
-            print_success "设备树恢复完成"
-        fi
-        
-        # 打包生成的内核文件
+        # 打包
         image_repack "MIUI"
         print_success "MIUI内核构建完成"
     fi
 }
 
-# =============================================================================
-# 主构建流程函数
-# 功能: 协调整个构建流程，处理错误和信号
-# =============================================================================
+# 主构建函数
 main_build() {
     local start_time=$(date +%s)
     
@@ -691,34 +596,16 @@ main_build() {
     print_info "构建类型: AOSP=$BUILD_AOSP, MIUI=$BUILD_MIUI"
     print_info "Git提交ID: $GIT_COMMIT_ID"
     
-    # 检查环境变量
-    if [ -n "$KSU_VERSION_FULL" ]; then
-        print_info "检测到自定义KernelSU版本: $KSU_VERSION_FULL"
-    fi
-    if [ -n "$KSU_API_VERSION" ]; then
-        print_info "检测到KernelSU API版本: $KSU_API_VERSION"
-    fi
+    # 应用SUSFS补丁 (从文档1移植的核心功能)
+    handle_susfs_patch
     
-    # 应用SUSFS补丁
-    print_info "开始SUSFS补丁处理..."
-    if ! apply_susfs_patch; then
-        print_warning "SUSFS补丁应用失败，尝试恢复..."
-        handle_patch_failure
-    fi
-    
-    # 准备AnyKernel3打包环境
+    # 准备AnyKernel3
     prepare_anykernel
     
-    # 检查KernelSU状态
-    check_kernelsu
-    
-    # 执行AOSP版本构建
+    # 执行构建
     build_aosp
-    
-    # 执行MIUI版本构建
     build_miui
     
-    # 计算总构建时间
     local end_time=$(date +%s)
     local total_duration=$((end_time - start_time))
     
@@ -726,8 +613,8 @@ main_build() {
     print_success "所有构建任务完成! 总耗时: $((total_duration / 60))分$((total_duration % 60))秒"
     
     # 显示生成的刷机包
-    print_info "生成的文件:"
-    find . -name "Kernel_*.zip" -exec echo "  - {}" \; 2>/dev/null || echo "  未找到刷机包"
+    print_info "生成的刷机包:"
+    ls -la Kernel_*.zip 2>/dev/null || print_warning "未找到刷机包文件"
     
     # 显示构建摘要
     echo
@@ -752,15 +639,10 @@ main_build() {
     fi
 }
 
-# =============================================================================
 # 错误处理陷阱
-# 功能: 捕获脚本执行过程中的错误和中断信号
-# =============================================================================
-
-# 错误处理陷阱 - 捕获脚本执行错误
 trap 'error_exit "脚本在行数 $LINENO 处发生错误"' ERR
 
-# 信号处理 - 捕获用户中断信号
+# 信号处理
 trap '
     echo
     color_echo "$red" "=============================================="
@@ -769,22 +651,10 @@ trap '
     exit 1
 ' INT TERM
 
-# =============================================================================
-# 脚本主入口
-# 功能: 执行主构建流程
-# =============================================================================
-
-# 执行主构建流程
+# --- 执行主流程 ---
 main_build
 
-# =============================================================================
-# 构建完成输出
-# 功能: 显示最终完成信息
-# =============================================================================
 echo
 color_echo "$green" "=============================================="
 color_echo "$green" "内核构建脚本执行完成!"
 color_echo "$green" "=============================================="
-
-# 退出脚本
-exit 0

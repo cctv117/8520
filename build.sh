@@ -166,20 +166,29 @@ setup_ccache() {
     # 创建ccache目录
     mkdir -p "$CCACHE_DIR"
     
-    # 配置ccache参数（优化编译速度）
-    ccache -o max_size="$CCACHE_MAXSIZE"
-    ccache -o compression=true
-    ccache -o compression_level=6
-    ccache -o hard_link=true
-    ccache -o sloppiness=file_macro,locale,time_macros
-    ccache -o hash_dir=false
+    # 配置ccache参数
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -o max_size="$CCACHE_MAXSIZE" 2>/dev/null || true
+        ccache -o compression=true 2>/dev/null || true
+        ccache -o compression_level=6 2>/dev/null || true
+        ccache -o hard_link=true 2>/dev/null || true
+        ccache -o sloppiness=file_macro,locale,time_macros 2>/dev/null || true
+        ccache -o hash_dir=false 2>/dev/null || true
+        print_success "ccache参数配置完成"
+    else
+        print_warning "ccache命令未找到，但构建将继续进行"
+    fi
     
     print_info "CCACHE_DIR: $CCACHE_DIR"
     print_info "CCACHE_MAXSIZE: $CCACHE_MAXSIZE"
     
-    # 显示初始统计
+    # 初始统计
     print_info "ccache初始状态:"
-    ccache -s | grep -E "(cache directory|cache size|max cache size|files in cache)"
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -s 2>/dev/null | head -10 || echo "ccache统计信息暂时不可用"
+    else
+        echo "ccache命令未找到"
+    fi
     
     # 设置编译器包装
     export CC="ccache clang"
@@ -523,7 +532,9 @@ build_aosp() {
             
             # 显示ccache统计
             print_info "AOSP编译ccache统计:"
-            ccache -s | grep -E "(hit rate|cache hit|cache miss)"
+            if command -v ccache >/dev/null 2>&1; then
+                ccache -s 2>/dev/null | grep -E "(hit rate|cache hit|cache miss)" || echo "无法获取ccache统计"
+            fi
         else
             error_exit "AOSP内核编译失败"
         fi
@@ -547,7 +558,7 @@ build_miui() {
         # 备份dts
         cp -a ${dts_source} .dts.bak
 
-        print_info "应用MIUI设备树修改"
+        print_info "MIUI设备树修改"
         
         # 面板尺寸修正
         sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
@@ -649,7 +660,9 @@ build_miui() {
             
             # 显示ccache统计
             print_info "MIUI编译ccache统计:"
-            ccache -s | grep -E "(hit rate|cache hit|cache miss)"
+            if command -v ccache >/dev/null 2>&1; then
+                ccache -s 2>/dev/null | grep -E "(hit rate|cache hit|cache miss)" || echo "无法获取ccache统计"
+            fi
         else
             error_exit "MIUI内核编译失败"
         fi
@@ -703,7 +716,11 @@ main_build() {
     
     # 显示ccache最终统计
     print_step "ccache最终统计"
-    ccache -s
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -s 2>/dev/null || echo "无法获取ccache统计信息"
+    else
+        echo "ccache命令未安装"
+    fi
     
     # 显示生成的刷机包
     print_info "生成的刷机包:"
@@ -732,8 +749,10 @@ main_build() {
     fi
     
     # 显示ccache命中率
-    local hit_rate=$(ccache -s | grep "hit rate" | awk '{print $4}' || echo "N/A")
-    color_echo "$green" "ccache命中率: $hit_rate"
+    if command -v ccache >/dev/null 2>&1; then
+        local hit_rate=$(ccache -s 2>/dev/null | grep "hit rate" | awk '{print $4}' || echo "N/A")
+        color_echo "$green" "ccache命中率: $hit_rate"
+    fi
 }
 
 # 错误处理陷阱

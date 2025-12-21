@@ -1,4 +1,4 @@
-name: Build Kernel all
+name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -69,14 +69,17 @@ jobs:
     - name: 配置ccache优化
       run: |
         mkdir -p ${{ env.CCACHE_DIR }}
-        ccache -o max_size=${{ env.CCACHE_MAXSIZE }}
-        ccache -o compression=true
-        ccache -o compression_level=6
-        ccache -o sloppiness=file_macro,locale,time_macros
-        ccache -o hash_dir=false
-        ccache -o hard_link=true
-        echo "ccache初始状态:"
-        ccache -s
+        if command -v ccache >/dev/null 2>&1; then
+            ccache -o max_size=${{ env.CCACHE_MAXSIZE }} 2>/dev/null || echo "ccache配置可能失败，但继续执行"
+            ccache -o compression=true 2>/dev/null || true
+            ccache -o compression_level=6 2>/dev/null || true
+            ccache -o sloppiness=file_macro,locale,time_macros 2>/dev/null || true
+            ccache -o hash_dir=false 2>/dev/null || true
+            ccache -o hard_link=true 2>/dev/null || true
+            echo "ccache配置完成"
+        else
+            echo "警告: ccache命令未找到，但构建将继续进行"
+        fi
 
     - name: 恢复ccache缓存
       uses: actions/cache@v4
@@ -86,6 +89,7 @@ jobs:
         key: kernel-ccache-${{ runner.os }}-4.19-${{ hashFiles('arch/arm64/configs/*_defconfig', 'build.sh') }}
         restore-keys: |
           kernel-ccache-${{ runner.os }}-4.19-
+      continue-on-error: true
 
     - name: 设置ZYC Clang工具链
       run: |
@@ -159,8 +163,6 @@ jobs:
         KSU_API_VERSION: ${{ env.KSU_API_VERSION }}
         CCACHE_DIR: ${{ env.CCACHE_DIR }}
         CCACHE_MAXSIZE: ${{ env.CCACHE_MAXSIZE }}
-        CCACHE_COMPRESS: ${{ env.CCACHE_COMPRESS }}
-        CCACHE_COMPRESSLEVEL: ${{ env.CCACHE_COMPRESSLEVEL }}
       run: |
         # 设置ccache环境变量
         export PATH="/usr/lib/ccache:$PATH"
@@ -175,61 +177,42 @@ jobs:
         echo "KSU API: $KSU_API_VERSION"
         echo "CCACHE_DIR: $CCACHE_DIR"
         echo "CCACHE_MAXSIZE: $CCACHE_MAXSIZE"
-        echo "ccache初始状态:"
-        ccache -s | grep -E "(cache directory|cache size|max cache size|files in cache)"
         
-        # 修正参数映射
+        # 安全显示ccache状态
+        echo "ccache状态:"
+        if command -v ccache >/dev/null 2>&1; then
+            ccache -s 2>/dev/null || echo "ccache统计信息暂时不可用（首次运行正常）"
+        else
+            echo "ccache未安装，但构建将继续"
+        fi
+        
+        # 参数映射
         BUILD_TYPE_ARG=""
         case "${{ github.event.inputs.build_type }}" in
-            "aosp")
-                BUILD_TYPE_ARG="--aosp"
-                echo "构建AOSP版本"
-                ;;
-            "miui")
-                BUILD_TYPE_ARG="--miui" 
-                echo "构建MIUI版本"
-                ;;
-            "all"|"")
-                BUILD_TYPE_ARG=""
-                echo "构建AOSP和MIUI版本"
-                ;;
+            "aosp") BUILD_TYPE_ARG="--aosp" ;;
+            "miui") BUILD_TYPE_ARG="--miui" ;;
         esac
         
         KSU_TYPE_ARG="${{ github.event.inputs.ksu_type }}"
-        if [[ "$KSU_TYPE_ARG" == "SukiSU-Ultra" ]]; then
-            KSU_TYPE_ARG="ksu"
-        fi
+        [[ "$KSU_TYPE_ARG" == "SukiSU-Ultra" ]] && KSU_TYPE_ARG="ksu"
         
         if [ -f "build.sh" ]; then
             chmod +x build.sh
-            echo "开始执行构建脚本..."
-            echo "构建命令: ./build.sh \"${{ github.event.inputs.device }}\" \"$KSU_TYPE_ARG\" \"$BUILD_TYPE_ARG\""
-            
-            # 记录开始时间
-            START_TIME=$(date +%s)
-            ./build.sh "${{ github.event.inputs.device }}" "$KSU_TYPE_ARG" "$BUILD_TYPE_ARG"
-            BUILD_EXIT_CODE=$?
-            END_TIME=$(date +%s)
-            DURATION=$((END_TIME - START_TIME))
-            
-            if [ $BUILD_EXIT_CODE -eq 0 ]; then
-                echo "✅ 构建成功完成，耗时: $((DURATION / 60))分$((DURATION % 60))秒"
-            else
-                echo "❌ 构建失败，退出码: $BUILD_EXIT_CODE"
-                exit $BUILD_EXIT_CODE
-            fi
+            echo "开始构建..."
+            time ./build.sh "${{ github.event.inputs.device }}" "$KSU_TYPE_ARG" "$BUILD_TYPE_ARG"
         else
-            echo "❌ 错误: build.sh 文件不存在"
-            ls -la
+            echo "错误: build.sh 不存在"
             exit 1
         fi
 
     - name: 显示ccache统计信息
       run: |
         echo "=== 构建后ccache统计 ==="
-        ccache -s
-        echo "=== 缓存命中率分析 ==="
-        ccache -s | grep -E "(hit rate|cache hit|cache miss)" || echo "无法获取命中率信息"
+        if command -v ccache >/dev/null 2>&1; then
+            ccache -s 2>/dev/null || echo "无法获取ccache统计信息"
+        else
+            echo "ccache命令未安装"
+        fi
 
     - name: 检查构建产物
       run: |
@@ -237,20 +220,12 @@ jobs:
         find . -name "Kernel_*.zip" -type f -exec ls -lh {} \; | while read line; do
           echo "📦 $line"
         done || echo "未找到zip文件"
-        
-        echo "=== 内核镜像文件 ==="
-        if [ -d "out/arch/arm64/boot" ]; then
-          ls -la out/arch/arm64/boot/
-        else
-          echo "未找到内核镜像目录"
-        fi
 
     - name: 上传内核包
       uses: actions/upload-artifact@v4
       with:
         name: kernel-${{ github.event.inputs.device }}-${{ github.event.inputs.ksu_type != 'none' && github.event.inputs.ksu_type || 'noksu' }}-${{ github.event.inputs.build_type }}
-        path: |
-          Kernel_*.zip
+        path: Kernel_*.zip
         retention-days: 7
         if-no-files-found: ignore
 
@@ -278,6 +253,3 @@ jobs:
         
         echo "生成的刷机包:"
         find . -name "Kernel_*.zip" -exec echo "  📦 {}" \; 2>/dev/null || echo "  未找到刷机包"
-        
-        echo "ccache最终统计:"
-        ccache -s | grep -E "(hit rate|files in cache)" || echo "无法获取ccache统计"

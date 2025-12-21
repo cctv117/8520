@@ -2,7 +2,7 @@
 
 # =============================================================================
 # Android内核构建脚本
-# 1.2
+# 1.5
 # =============================================================================
 
 # 颜色定义
@@ -46,7 +46,7 @@ print_success() {
 
 # 信息函数
 print_info() {
-    color_echo "$blue" "ℹ $1"
+    color_echo "$blue" "ℹℹℹℹℹℹℹℹℹℹℹℹℹℹℹℹ $1"
 }
 
 # 警告函数
@@ -152,6 +152,43 @@ case "$KSU_TYPE" in
         ;;
 esac
 
+# 配置ccache优化
+setup_ccache() {
+    print_step "配置ccache缓存优化"
+    
+    # 设置ccache环境变量
+    export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache_kernel_4.19}"
+    export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
+    export CCACHE_COMPRESS=true
+    export CCACHE_COMPRESSLEVEL=6
+    export CCACHE_HARDLINK=true
+    
+    # 创建ccache目录
+    mkdir -p "$CCACHE_DIR"
+    
+    # 配置ccache参数（优化编译速度）
+    ccache -o max_size="$CCACHE_MAXSIZE"
+    ccache -o compression=true
+    ccache -o compression_level=6
+    ccache -o hard_link=true
+    ccache -o sloppiness=file_macro,locale,time_macros
+    ccache -o hash_dir=false
+    
+    print_info "CCACHE_DIR: $CCACHE_DIR"
+    print_info "CCACHE_MAXSIZE: $CCACHE_MAXSIZE"
+    
+    # 显示初始统计
+    print_info "ccache初始状态:"
+    ccache -s | grep -E "(cache directory|cache size|max cache size|files in cache)"
+    
+    # 设置编译器包装
+    export CC="ccache clang"
+    export CXX="ccache clang++"
+    export PATH="/usr/lib/ccache:$PATH"
+    
+    print_success "ccache配置完成"
+}
+
 if [ ! -d $TOOLCHAIN_PATH ]; then
     error_exit "TOOLCHAIN_PATH [$TOOLCHAIN_PATH] 不存在"
 fi
@@ -173,48 +210,18 @@ if ! command -v clang >/dev/null 2>&1; then
     error_exit "[clang] 不存在"
 fi
 
-# 优化ccache配置
-export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache_mikernel}"
-export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
-export CCACHE_COMPRESS="${CCACHE_COMPRESS:-true}"
-export CCACHE_COMPRESSLEVEL="${CCACHE_COMPRESSLEVEL:-6}"
-export CCACHE_HARDLINK="${CCACHE_HARDLINK:-true}"
-export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
-
-# 创建ccache目录
-mkdir -p "$CCACHE_DIR"
-
 # 配置ccache
-ccache -M "$CCACHE_MAXSIZE" >/dev/null 2>&1 || true
-ccache -o compression="$CCACHE_COMPRESS" >/dev/null 2>&1 || true
-ccache -o compression_level="$CCACHE_COMPRESSLEVEL" >/dev/null 2>&1 || true
-ccache -o hard_link="$CCACHE_HARDLINK" >/dev/null 2>&1 || true
-ccache -o hash_dir="$CCACHE_NOHASHDIR" >/dev/null 2>&1 || true
+setup_ccache
 
-# 使用ccache包装编译器
-export CC="ccache clang"
-export CXX="ccache clang++"
-export PATH="/usr/lib/ccache:$PATH"
+MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-print_info "CCACHE配置:"
-print_info "CCACHE_DIR: [$CCACHE_DIR]"
-print_info "CCACHE_MAXSIZE: [$CCACHE_MAXSIZE]"
-print_info "使用编译器: $(which clang)"
-
-# 显示ccache初始状态
-print_info "ccache初始状态:"
-ccache -s 2>/dev/null || print_warning "无法获取ccache状态"
-
-MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=\"ccache clang\" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-
-# 特殊设备处理
 if [ "$TARGET_DEVICE" == "j1" ]; then
     make $MAKE_ARGS -j1
     exit
 fi
 
 if [ "$TARGET_DEVICE" == "continue" ]; then
-    make $MAKE_ARGS -j$(nproc --all)
+    make $MAKE_ARGS -j$(nproc)
     exit
 fi
 
@@ -503,15 +510,10 @@ build_aosp() {
         setup_version_info
         configure_kernelsu
         
-        # 编译
+        # 编译 - 使用ccache加速
         local start_time=$(date +%s)
-        print_info "开始编译AOSP内核..."
-        
-        # 使用ccache加速编译
-        export CCACHE_LOGFILE="$CCACHE_DIR/ccache.log"
-        print_info "使用ccache编译，日志: $CCACHE_LOGFILE"
-        
-        make $MAKE_ARGS -j$(nproc --all)
+        print_info "开始编译AOSP内核（使用ccache加速）..."
+        make $MAKE_ARGS -j$(nproc)
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
@@ -520,8 +522,8 @@ build_aosp() {
             print_success "AOSP内核编译成功，耗时: $((duration / 60))分$((duration % 60))秒"
             
             # 显示ccache统计
-            print_info "ccache编译统计:"
-            ccache -s 2>/dev/null || true
+            print_info "AOSP编译ccache统计:"
+            ccache -s | grep -E "(hit rate|cache hit|cache miss)"
         else
             error_exit "AOSP内核编译失败"
         fi
@@ -545,8 +547,7 @@ build_miui() {
         # 备份dts
         cp -a ${dts_source} .dts.bak
 
-        # MIUI特定修改
-        print_info "应用MIUI设备树修改..."
+        print_info "应用MIUI设备树修改"
         
         # 面板尺寸修正
         sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
@@ -635,15 +636,10 @@ build_miui() {
             -e MI_RECLAIM \
             -e RTMM
 
-        # 编译
+        # 编译 - 使用ccache加速
         local start_time=$(date +%s)
-        print_info "开始编译MIUI内核..."
-        
-        # 使用ccache加速编译
-        export CCACHE_LOGFILE="$CCACHE_DIR/ccache.log"
-        print_info "使用ccache编译，日志: $CCACHE_LOGFILE"
-        
-        make $MAKE_ARGS -j$(nproc --all)
+        print_info "开始编译MIUI内核（使用ccache加速）..."
+        make $MAKE_ARGS -j$(nproc)
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
@@ -652,14 +648,22 @@ build_miui() {
             print_success "MIUI内核编译成功，耗时: $((duration / 60))分$((duration % 60))秒"
             
             # 显示ccache统计
-            print_info "ccache编译统计:"
-            ccache -s 2>/dev/null || true
+            print_info "MIUI编译ccache统计:"
+            ccache -s | grep -E "(hit rate|cache hit|cache miss)"
         else
             error_exit "MIUI内核编译失败"
         fi
         
         # 打包
         image_repack "MIUI"
+        
+        # 恢复设备树
+        if [ -d ".dts.bak" ]; then
+            rm -rf arch/arm64/boot/dts/vendor/qcom
+            mv .dts.bak arch/arm64/boot/dts/vendor/qcom
+            print_success "设备树恢复完成"
+        fi
+        
         print_success "MIUI内核构建完成"
     fi
 }
@@ -673,10 +677,6 @@ main_build() {
     print_info "KernelSU: $KSU_ZIP_STR"
     print_info "构建类型: AOSP=$BUILD_AOSP, MIUI=$BUILD_MIUI"
     print_info "Git提交ID: $GIT_COMMIT_ID"
-    
-    # 显示ccache初始状态
-    print_info "ccache初始状态:"
-    ccache -s 2>/dev/null || print_warning "无法获取ccache状态"
     
     # 1. 执行KSU补丁脚本
     if [ $KSU_ENABLE -eq 1 ]; then
@@ -702,8 +702,8 @@ main_build() {
     print_success "所有构建任务完成! 总耗时: $((total_duration / 60))分$((total_duration % 60))秒"
     
     # 显示ccache最终统计
-    print_info "ccache最终统计:"
-    ccache -s 2>/dev/null || true
+    print_step "ccache最终统计"
+    ccache -s
     
     # 显示生成的刷机包
     print_info "生成的刷机包:"
@@ -731,12 +731,9 @@ main_build() {
         find . -name "Kernel_*.zip" -type f -exec echo "  - {}" \; 2>/dev/null
     fi
     
-    # 显示ccache性能统计
-    echo
-    color_echo "$cyan" "=============================================="
-    color_echo "$cyan" "ccache性能统计"
-    color_echo "$cyan" "=============================================="
-    ccache -s 2>/dev/null | grep -E "(hit rate|cache hit|primary storage)" || true
+    # 显示ccache命中率
+    local hit_rate=$(ccache -s | grep "hit rate" | awk '{print $4}' || echo "N/A")
+    color_echo "$green" "ccache命中率: $hit_rate"
 }
 
 # 错误处理陷阱
@@ -748,34 +745,8 @@ trap '
     color_echo "$red" "=============================================="
     color_echo "$red" "脚本被用户中断"
     color_echo "$red" "=============================================="
-    # 保存ccache缓存
-    if command -v ccache >/dev/null 2>&1; then
-        echo "保存ccache缓存..."
-        ccache -s 2>/dev/null || true
-    fi
     exit 1
 ' INT TERM
-
-# 清理函数
-cleanup() {
-    local exit_code=$?
-    
-    # 显示ccache最终统计
-    if command -v ccache >/dev/null 2>&1; then
-        echo
-        color_echo "$blue" "最终ccache统计:"
-        ccache -s 2>/dev/null || true
-    fi
-    
-    # 清理临时文件
-    rm -f susfs_inline_hook_patches.sh backport_patches.sh susfs_upgrade_to_2000_4.19.patch 2>/dev/null || true
-    find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete 2>/dev/null || true
-    
-    return $exit_code
-}
-
-# 设置退出时执行清理
-trap cleanup EXIT
 
 # --- 执行主流程 ---
 main_build

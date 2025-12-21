@@ -196,10 +196,23 @@ if ! command -v clang >/dev/null 2>&1; then
     error_exit "[clang] 不存在"
 fi
 
-# 编译参数配置
-MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=\"ccache clang\" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+# 设置编译环境变量
+export ARCH=arm64
+export SUBARCH=arm64
+export O=out
+export CC="ccache clang"
+export CROSS_COMPILE="aarch64-linux-gnu-"
+export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
+export CROSS_COMPILE_COMPAT="arm-linux-gnueabi-"
+export CLANG_TRIPLE="aarch64-linux-gnu-"
 
-print_info "MAKE_ARGS配置: $MAKE_ARGS"
+MAKE_ARGS=""
+
+print_info "编译环境变量设置完成"
+print_info "CC: $CC"
+print_info "ARCH: $ARCH"
+print_info "CROSS_COMPILE: $CROSS_COMPILE"
+
 
 # 特殊设备处理
 if [ "$TARGET_DEVICE" == "j1" ]; then

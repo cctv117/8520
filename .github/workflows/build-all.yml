@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel all
 
 on:
   workflow_dispatch:
@@ -43,10 +43,16 @@ on:
 env:
   CCACHE_DIR: "$HOME/.ccache_4.19.157"
   CCACHE_MAXSIZE: "3G"
+  CCACHE_COMPILERCHECK: "none"
+  CCACHE_BASEDIR: "$GITHUB_WORKSPACE"
+  CCACHE_NOHASHDIR: "true"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    env:
+      CCACHE_DIR: "$HOME/.ccache_4.19.157"
+      CCACHE_MAXSIZE: "3G"
 
     steps:
     - name: 检出代码
@@ -72,7 +78,7 @@ jobs:
         df -h
         echo "当前构建内核版本：4.19.157"
 
-    - name: 载入当前版本内核的ccache缓存
+    - name: 载入ccache缓存
       uses: actions/cache@v4
       id: ccache-restore
       with:
@@ -82,10 +88,9 @@ jobs:
           ccache-neov3-4.19.157-${{ runner.os }}-
           ccache-neov3-4.19.157-
 
-    - name: 初始化并配置ccache
+    - name: 初始化ccache
       run: |
         mkdir -p "$CCACHE_DIR"
-        echo "配置ccache缓存大小为: $CCACHE_MAXSIZE"
         ccache -M "$CCACHE_MAXSIZE"
         ccache -o compression=true
         echo "ccache初始状态:"
@@ -108,12 +113,9 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/tmp-builtin/kernel/setup.sh" | bash -s tmp-builtin
           cd ./KernelSU
           
-          # 获取当前 Git 提交的短哈希 (7位)
           GIT_COMMIT_HASH=$(git rev-parse --short=7 HEAD)
           echo "当前提交哈希: $GIT_COMMIT_HASH"
-          export KSU_VERSION=$KSU_VERSION
           
-          # 尝试最多 3 次获取 KernelSU API 版本号
           for i in {1..3}; do
             KSU_API_VERSION=$(curl -s "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/tmp-builtin/kernel/Kbuild" | 
               grep -m1 "KSU_VERSION_API :=" | 
@@ -161,6 +163,11 @@ jobs:
       env:
         KSU_VERSION_FULL: ${{ env.KSU_VERSION_FULL }}
         KSU_API_VERSION: ${{ env.KSU_API_VERSION }}
+        CCACHE_DIR: ${{ env.CCACHE_DIR }}
+        CCACHE_MAXSIZE: ${{ env.CCACHE_MAXSIZE }}
+        CCACHE_COMPILERCHECK: ${{ env.CCACHE_COMPILERCHECK }}
+        CCACHE_BASEDIR: ${{ env.CCACHE_BASEDIR }}
+        CCACHE_NOHASHDIR: ${{ env.CCACHE_NOHASHDIR }}
       run: |
         export CCACHE_COMPILERCHECK="none"
         export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
@@ -172,8 +179,8 @@ jobs:
         echo "构建类型: ${{ github.event.inputs.build_type }}"
         echo "KSU版本: $KSU_VERSION_FULL"
         echo "KSU API: $KSU_API_VERSION"
+        echo "CCACHE_DIR: $CCACHE_DIR"
         
-        # 修正参数映射
         BUILD_TYPE_ARG=""
         case "${{ github.event.inputs.build_type }}" in
             "aosp")
@@ -215,7 +222,7 @@ jobs:
             exit 1
         fi
 
-    - name: 显示ccache统计信息
+    - name: 显示ccache统计
       run: |
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         echo "构建后ccache统计信息:"

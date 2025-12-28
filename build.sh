@@ -287,8 +287,8 @@ execute_ksu_patch_scripts() {
 # SUSFS 2.0.00补丁处理
 # ==========================================
 apply_susfs_patch() {
-    local PATCH_URL="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/blob/mainline/Patches/Patch/susfs_upgrade_to_2000_4.19.patch"
-    local PATCH_FILE="susfs_upgrade_to_2000_4.19.patch"
+    local PATCH_URL="https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/blob/mainline/Patches/Patch/susfs_patch_to_4.19.patch"
+    local PATCH_FILE="susfs_patch_to_4.19.patch"
     
     print_info "开始SUSFS 2.0.00补丁处理"
 

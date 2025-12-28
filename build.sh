@@ -329,15 +329,15 @@ handle_susfs_patch() {
         git checkout -- . || print_warning "部分文件恢复失败"
         
         # 清理临时文件
-        rm -f "susfs_upgrade_to_2000_4.19.patch"
+        rm -f "susfs_patch_to_4.19.patch"
         find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete
         
         # cherry-pick
-        print_info "尝试cherry-pick提交 7de1989..."
-        if git cherry-pick 7de1989; then
+        print_info "尝试cherry-pick提交 99e900c..."
+        if git cherry-pick 99e900c; then
             print_success "cherry-pick成功"
         else
-            error_exit "cherry-pick失败！请检查提交7de1989是否存在"
+            error_exit "cherry-pick失败！请检查提交99e900c是否存在"
         fi
     else
         print_success "SUSFS补丁处理完成"
